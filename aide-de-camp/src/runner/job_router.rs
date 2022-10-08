@@ -1,3 +1,5 @@
+use super::job_event::JobEvent;
+use super::job_info::JobInfo;
 use super::wrapped_job::{BoxedJobHandler, WrappedJobHandler};
 use crate::core::job_handle::JobHandle;
 use crate::core::job_processor::{JobError, JobProcessor};
@@ -5,6 +7,9 @@ use crate::core::queue::{Queue, QueueError};
 use bincode::{self, Decode, Encode};
 use chrono::Duration;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+use tap::prelude::*;
 use thiserror::Error;
 use tracing::instrument;
 
@@ -67,15 +72,32 @@ impl RunnerRouter {
     /// own job runner, then this is what you should use to process job that is already pulled
     /// from the queue. In all other cases, you shouldn't use this function directly.
     #[instrument(skip_all, err, fields(job_type = %job_handle.job_type(), jid = %job_handle.id().to_string(), retries = job_handle.retries()))]
-    pub async fn process<H: JobHandle>(&self, job_handle: H) -> Result<(), RunnerError> {
+    pub async fn process<H: JobHandle>(
+        &self,
+        job_handle: H,
+        event_tx: tokio::sync::broadcast::Sender<JobEvent>,
+    ) -> Result<(), RunnerError> {
         if let Some(r) = self.jobs.get(job_handle.job_type()) {
+            let start = Instant::now();
+            let job_id = job_handle.id();
+            let retries = job_handle.retries();
             match r
-                .handle(job_handle.id(), job_handle.payload())
+                .handle(job_id, job_handle.payload())
                 .await
                 .map_err(JobError::from)
             {
                 Ok(_) => {
                     job_handle.complete().await?;
+
+                    event_tx
+                        .send(JobEvent::Succeeded(JobInfo {
+                            id: job_id,
+                            duration: Instant::now() - start,
+                            retries,
+                        }))
+                        .tap_err(|e| tracing::warn!("Error sending job succeeded event: {e:?}"))
+                        .ok();
+
                     Ok(())
                 }
                 Err(e) => {
@@ -83,9 +105,37 @@ impl RunnerRouter {
                     if job_handle.retries() >= r.max_retries() {
                         tracing::warn!("Moving job {} to dead queue", job_handle.id().to_string());
                         job_handle.dead_queue().await?;
+
+                        event_tx
+                            .send(JobEvent::DeadQueue(
+                                JobInfo {
+                                    id: job_id,
+                                    duration: Instant::now() - start,
+                                    retries,
+                                },
+                                Arc::new(e),
+                            ))
+                            .tap_err(|e| {
+                                tracing::warn!("Error sending job moved to dead queue event: {e:?}")
+                            })
+                            .ok();
+
                         Ok(())
                     } else {
                         job_handle.fail().await?;
+
+                        event_tx
+                            .send(JobEvent::Failed(
+                                JobInfo {
+                                    id: job_id,
+                                    duration: Instant::now() - start,
+                                    retries,
+                                },
+                                Arc::new(e),
+                            ))
+                            .tap_err(|e| tracing::warn!("Error sending job failed event: {e:?}"))
+                            .ok();
+
                         Ok(())
                     }
                 }
@@ -100,15 +150,19 @@ impl RunnerRouter {
     /// In a loop, poll the queue with interval (passes interval to `Queue::next`) and process
     /// incoming jobs. Function process jobs one-by-one without job-level concurrency. If you need
     /// concurrency, look at the `JobRunner` instead.
-    pub async fn listen<Q, QR>(&self, queue: Q, poll_interval: Duration)
-    where
+    pub async fn listen<Q, QR>(
+        &self,
+        queue: Q,
+        poll_interval: Duration,
+        event_tx: tokio::sync::broadcast::Sender<JobEvent>,
+    ) where
         Q: AsRef<QR>,
         QR: Queue,
     {
         let job_types = self.types();
         loop {
             match queue.as_ref().next(&job_types, poll_interval).await {
-                Ok(handle) => match self.process(handle).await {
+                Ok(handle) => match self.process(handle, event_tx.clone()).await {
                     Ok(_) => {}
                     Err(RunnerError::QueueError(e)) => handle_queue_error(e).await,
                     Err(RunnerError::UnknownJobType(name)) => {

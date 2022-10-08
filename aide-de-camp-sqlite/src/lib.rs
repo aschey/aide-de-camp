@@ -6,6 +6,7 @@ pub mod types;
 
 pub use queue::SqliteQueue;
 use sqlx::migrate::Migrator;
+pub use sqlx;
 pub static MIGRATOR: Migrator = sqlx::migrate!();
 
 #[cfg(test)]

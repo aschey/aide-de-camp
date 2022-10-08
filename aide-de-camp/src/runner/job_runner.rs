@@ -1,4 +1,4 @@
-use super::job_router::RunnerRouter;
+use super::{event_store::EventStore, job_event::JobEvent, job_router::RunnerRouter};
 use crate::core::queue::{Queue, QueueError};
 use anyhow::Context;
 use rand::seq::SliceRandom;
@@ -30,6 +30,7 @@ where
     queue: Arc<Q>,
     processor: Arc<RunnerRouter>,
     semaphore: Arc<Semaphore>,
+    event_tx: tokio::sync::broadcast::Sender<JobEvent>,
 }
 
 impl<Q> JobRunner<Q>
@@ -38,10 +39,12 @@ where
 {
     /// Create a new JobRunner with desired concurrency from queue and router.
     pub fn new(queue: Q, processor: RunnerRouter, concurrency: usize) -> Self {
+        let (event_tx, _) = tokio::sync::broadcast::channel(32);
         Self {
             queue: Arc::new(queue),
             processor: Arc::new(processor),
             semaphore: Arc::new(Semaphore::new(concurrency)),
+            event_tx,
         }
     }
 }
@@ -61,14 +64,19 @@ where
                 .context("Semaphore closed while running")?;
             let queue = self.queue.clone();
             let processor = self.processor.clone();
+            let event_tx = self.event_tx.clone();
             tokio::spawn(async move {
                 let _permit = permit;
                 let queue = queue;
                 let processor = processor;
                 let interval = interval + get_random_jitter();
-                processor.listen(queue, interval).await;
+                processor.listen(queue, interval, event_tx).await;
             });
         }
+    }
+
+    pub fn event_store(&self) -> EventStore {
+        EventStore::new(self.event_tx.clone())
     }
 }
 
