@@ -10,6 +10,7 @@ pub mod runner {
     pub mod job_info;
     pub mod job_router;
     pub mod job_runner;
+    pub mod shutdown_options;
     pub mod wrapped_job;
 }
 
@@ -22,7 +23,9 @@ pub mod prelude {
         Duration, Xid,
     };
     #[cfg(feature = "runner")]
-    pub use super::runner::{job_router::RunnerRouter, job_runner::JobRunner};
+    pub use super::runner::{
+        job_router::RunnerRouter, job_runner::JobRunner, shutdown_options::ShutdownOptions,
+    };
     pub use bincode::{Decode, Encode};
 }
 

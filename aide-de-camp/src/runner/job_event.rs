@@ -7,6 +7,7 @@ use super::job_info::JobInfo;
 #[derive(Clone, Debug)]
 pub enum JobEvent {
     Succeeded(JobInfo),
+    Cancelled(JobInfo),
     DeadQueue(JobInfo, Arc<JobError>),
     Failed(JobInfo, Arc<JobError>),
 }

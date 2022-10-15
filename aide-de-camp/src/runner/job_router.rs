@@ -1,3 +1,4 @@
+use super::event_store::EventStore;
 use super::job_event::JobEvent;
 use super::job_info::JobInfo;
 use super::wrapped_job::{BoxedJobHandler, WrappedJobHandler};
@@ -7,6 +8,7 @@ use crate::core::queue::{Queue, QueueError};
 use bincode::{self, Decode, Encode};
 use chrono::Duration;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 use tap::prelude::*;
@@ -72,72 +74,88 @@ impl RunnerRouter {
     /// own job runner, then this is what you should use to process job that is already pulled
     /// from the queue. In all other cases, you shouldn't use this function directly.
     #[instrument(skip_all, err, fields(job_type = %job_handle.job_type(), jid = %job_handle.id().to_string(), retries = job_handle.retries()))]
-    pub async fn process<H: JobHandle>(
+    pub async fn process<H: JobHandle, F: Future<Output = ()>>(
         &self,
         job_handle: H,
         event_tx: tokio::sync::broadcast::Sender<JobEvent>,
+        cancel: F,
     ) -> Result<(), RunnerError> {
         if let Some(r) = self.jobs.get(job_handle.job_type()) {
             let start = Instant::now();
             let job_id = job_handle.id();
             let retries = job_handle.retries();
-            match r
-                .handle(job_id, job_handle.payload())
-                .await
-                .map_err(JobError::from)
-            {
-                Ok(_) => {
-                    job_handle.complete().await?;
+            tokio::select! {
+                job_result = r.handle(job_id, job_handle.payload()) => {
+                    match job_result.map_err(JobError::from) {
+                        Ok(_) => {
+                            job_handle.complete().await?;
 
+                            event_tx
+                                .send(JobEvent::Succeeded(JobInfo {
+                                    id: job_id,
+                                    duration: Instant::now() - start,
+                                    retries,
+                                }))
+                                .tap_err(|e| tracing::warn!("Error sending job succeeded event: {e:?}"))
+                                .ok();
+
+                            Ok(())
+                        }
+                        Err(e) => {
+                            tracing::error!("Error during job processing: {}", e);
+                            if job_handle.retries() >= r.max_retries() {
+                                tracing::warn!("Moving job {} to dead queue", job_handle.id().to_string());
+                                job_handle.dead_queue().await?;
+
+                                event_tx
+                                    .send(JobEvent::DeadQueue(
+                                        JobInfo {
+                                            id: job_id,
+                                            duration: Instant::now() - start,
+                                            retries,
+                                        },
+                                        Arc::new(e),
+                                    ))
+                                    .tap_err(|e| {
+                                        tracing::warn!("Error sending job moved to dead queue event: {e:?}")
+                                    })
+                                    .ok();
+
+                                Ok(())
+                            } else {
+                                job_handle.fail().await?;
+
+                                event_tx
+                                    .send(JobEvent::Failed(
+                                        JobInfo {
+                                            id: job_id,
+                                            duration: Instant::now() - start,
+                                            retries,
+                                        },
+                                        Arc::new(e),
+                                    ))
+                                    .tap_err(|e| tracing::warn!("Error sending job failed event: {e:?}"))
+                                    .ok();
+
+                                Ok(())
+                            }
+                        }
+                    }
+                }
+                _ = cancel => {
+                    tracing::warn!("Job was cancelled");
                     event_tx
-                        .send(JobEvent::Succeeded(JobInfo {
-                            id: job_id,
-                            duration: Instant::now() - start,
-                            retries,
-                        }))
-                        .tap_err(|e| tracing::warn!("Error sending job succeeded event: {e:?}"))
+                        .send(JobEvent::Cancelled(
+                            JobInfo {
+                                id: job_id,
+                                duration: Instant::now() - start,
+                                retries,
+                            }
+                        ))
+                        .tap_err(|e| tracing::warn!("Error sending job cancelled event: {e:?}"))
                         .ok();
 
                     Ok(())
-                }
-                Err(e) => {
-                    tracing::error!("Error during job processing: {}", e);
-                    if job_handle.retries() >= r.max_retries() {
-                        tracing::warn!("Moving job {} to dead queue", job_handle.id().to_string());
-                        job_handle.dead_queue().await?;
-
-                        event_tx
-                            .send(JobEvent::DeadQueue(
-                                JobInfo {
-                                    id: job_id,
-                                    duration: Instant::now() - start,
-                                    retries,
-                                },
-                                Arc::new(e),
-                            ))
-                            .tap_err(|e| {
-                                tracing::warn!("Error sending job moved to dead queue event: {e:?}")
-                            })
-                            .ok();
-
-                        Ok(())
-                    } else {
-                        job_handle.fail().await?;
-
-                        event_tx
-                            .send(JobEvent::Failed(
-                                JobInfo {
-                                    id: job_id,
-                                    duration: Instant::now() - start,
-                                    retries,
-                                },
-                                Arc::new(e),
-                            ))
-                            .tap_err(|e| tracing::warn!("Error sending job failed event: {e:?}"))
-                            .ok();
-
-                        Ok(())
-                    }
                 }
             }
         } else {
@@ -155,22 +173,42 @@ impl RunnerRouter {
         queue: Q,
         poll_interval: Duration,
         event_tx: tokio::sync::broadcast::Sender<JobEvent>,
+        shutdown_event_store: EventStore<()>,
+        job_timeout: Duration,
     ) where
         Q: AsRef<QR>,
         QR: Queue,
     {
+        let job_timeout = job_timeout.to_std().unwrap_or_else(|e| {
+            tracing::warn!("Error parsing job timeout, using default: {e:?}");
+            std::time::Duration::default()
+        });
         let job_types = self.types();
+        let mut shutdown_rx = shutdown_event_store.subscribe_events();
         loop {
-            match queue.as_ref().next(&job_types, poll_interval).await {
-                Ok(handle) => match self.process(handle, event_tx.clone()).await {
-                    Ok(_) => {}
-                    Err(RunnerError::QueueError(e)) => handle_queue_error(e).await,
-                    Err(RunnerError::UnknownJobType(name)) => {
-                        tracing::error!("Unknown job type: {}", name)
+            tokio::select! {
+                next = queue.as_ref().next(&job_types, poll_interval) => {
+                    let mut shutdown_rx = shutdown_event_store.subscribe_events();
+                    match next {
+                        Ok(handle) => match self.process(handle, event_tx.clone(), async move {
+                            shutdown_rx.recv().await.ok();
+                            tokio::time::sleep(job_timeout).await;
+                            tracing::warn!("Job did not complete within the cancellation grace period");
+                        }).await {
+                            Ok(_) => {}
+                            Err(RunnerError::QueueError(e)) => handle_queue_error(e).await,
+                            Err(RunnerError::UnknownJobType(name)) => {
+                                tracing::error!("Unknown job type: {}", name)
+                            }
+                        },
+                        Err(e) => {
+                            handle_queue_error(e).await;
+                        }
                     }
-                },
-                Err(e) => {
-                    handle_queue_error(e).await;
+                }
+                _ = shutdown_rx.recv() => {
+                    tracing::debug!("No job running, shutting down");
+                    return
                 }
             }
         }

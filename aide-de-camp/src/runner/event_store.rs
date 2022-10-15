@@ -1,16 +1,14 @@
-use super::job_event::JobEvent;
-
 #[derive(Clone)]
-pub struct EventStore {
-    event_tx: tokio::sync::broadcast::Sender<JobEvent>,
+pub struct EventStore<T> {
+    event_tx: tokio::sync::broadcast::Sender<T>,
 }
 
-impl EventStore {
-    pub(crate) fn new(event_tx: tokio::sync::broadcast::Sender<JobEvent>) -> Self {
+impl<T> EventStore<T> {
+    pub(crate) fn new(event_tx: tokio::sync::broadcast::Sender<T>) -> Self {
         Self { event_tx }
     }
 
-    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<JobEvent> {
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<T> {
         self.event_tx.subscribe()
     }
 }

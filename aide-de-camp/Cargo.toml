@@ -1,33 +1,33 @@
 [package]
-name = "aide-de-camp"
-version = "0.1.1"
+authors = ["Andrey Snow <andoriyu@gmail.com>"]
+description = "Aide-De-Camp is a backend agnostic delayed job queue."
+documentation = "https://docs.rs/aide-de-camp"
 edition = "2021"
+keywords = ["job", "scheduler", "queue"]
 license = "MIT OR Apache-2.0"
+name = "aide-de-camp"
 readme = "README.md"
 repository = "https://github.com/zero-assumptions/aide-de-camp"
-documentation = "https://docs.rs/aide-de-camp"
-description = "Aide-De-Camp is a backend agnostic delayed job queue."
-keywords = ["job", "scheduler", "queue"]
-authors = ["Andrey Snow <andoriyu@gmail.com>"]
+version = "0.1.1"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1.0.53"
 async-trait = "0.1.52"
-bincode = { version = "2.0.0-rc.1" }
+bincode = {version = "2.0.0-rc.1"}
 bytes = "1.1.0"
 chrono = "0.4"
-rand = { version = "0.8.5", optional = true }
+futures = "0.3"
+rand = {version = "0.8.5", optional = true}
 tap = "1.0.1"
 thiserror = "1.0.30"
-tokio = { version = "1", features = ["time", "sync"] }
+tokio = {version = "1", features = ["time", "sync"]}
 tracing = "0.1.30"
 xid = "1.0.0"
 
-
 [dev-dependencies]
-tokio = { version = "1", features = ["macros"] }
+tokio = {version = "1", features = ["macros"]}
 
 [features]
 default = ["runner"]
