@@ -52,7 +52,7 @@ Crate includes [SQLx `MIGRATOR`](https://docs.rs/sqlx/0.4.0-beta.1/sqlx/macro.mi
 ```rust
 
 use aide_de_camp_sqlite::{SqliteQueue, MIGRATOR};
-use aide_de_camp::prelude::{Queue, JobProcessor, JobRunner, RunnerRouter, Duration, Xid};
+use aide_de_camp::prelude::{Queue, JobProcessor, JobRunner, RunnerRouter, Duration, Xid, CancellationToken};
 use async_trait::async_trait;
 use sqlx::SqlitePool;
 
@@ -63,7 +63,7 @@ impl JobProcessor for MyJob {
     type Payload = Vec<u32>;
     type Error = anyhow::Error;
 
-    async fn handle(&self, jid: Xid, payload: Self::Payload) -> Result<(), Self::Error> {
+    async fn handle(&self, jid: Xid, payload: Self::Payload, cancellation_token: CancellationToken) -> Result<(), Self::Error> {
         // Do work here
         Ok(())
     }
@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let queue = SqliteQueue::with_pool(pool);
 
     // Add job the queue to run next
-    let _jid = queue.schedule::<MyJob>(vec![1,2,3]).await?;
+    let _jid = queue.schedule::<MyJob>(vec![1,2,3], 0).await?;
 
     // First create a job processor and router
     let router = {

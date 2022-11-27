@@ -2,13 +2,14 @@ use crate::core::Xid;
 use async_trait::async_trait;
 use std::convert::Infallible;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 /// A job-handler interface. Your Payload should implement `bincode::{Decode, Encode}` if you're
 /// planning to use it with the runner and Queue from this crate.
 ///
 /// ## Example
 /// ```rust
-/// use aide_de_camp::prelude::{JobProcessor, Encode, Decode, Xid};
+/// use aide_de_camp::prelude::{JobProcessor, Encode, Decode, Xid, CancellationToken};
 /// use async_trait::async_trait;
 /// struct MyJob;
 /// #[derive(Encode, Decode)]
@@ -23,7 +24,7 @@ use thiserror::Error;
 ///         "my_job"
 ///     }
 ///
-///     async fn handle(&self, jid: Xid, payload: Self::Payload) -> Result<(), Self::Error> {
+///     async fn handle(&self, jid: Xid, payload: Self::Payload, cancellation_token: CancellationToken) -> Result<(), Self::Error> {
 ///         // ..do work
 ///         Ok(())
 ///     }
@@ -39,7 +40,12 @@ pub trait JobProcessor: Send + Sync {
     /// What error is returned
     type Error: Send;
     /// Run the job, passing payload to it. Your payload should implement `bincode::Decode`.
-    async fn handle(&self, jid: Xid, payload: Self::Payload) -> Result<(), Self::Error>;
+    async fn handle(
+        &self,
+        jid: Xid,
+        payload: Self::Payload,
+        cancellation_token: CancellationToken,
+    ) -> Result<(), Self::Error>;
 
     /// How many times job should be retried before being moved to dead queue
     fn max_retries(&self) -> u32 {

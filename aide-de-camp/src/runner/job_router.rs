@@ -1,4 +1,3 @@
-use super::event_store::EventStore;
 use super::job_event::JobEvent;
 use super::job_info::JobInfo;
 use super::wrapped_job::{BoxedJobHandler, WrappedJobHandler};
@@ -13,6 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tap::prelude::*;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 /// A job processor router. Matches job type to job processor implementation.
@@ -20,7 +20,7 @@ use tracing::instrument;
 ///
 /// ## Example
 /// ```rust
-/// use aide_de_camp::prelude::{JobProcessor, RunnerRouter, Encode, Decode, Xid};
+/// use aide_de_camp::prelude::{JobProcessor, RunnerRouter, Encode, Decode, Xid, CancellationToken};
 /// use async_trait::async_trait;
 /// struct MyJob;
 /// #[derive(Encode, Decode)]
@@ -35,7 +35,7 @@ use tracing::instrument;
 ///         "my_job"
 ///     }
 ///
-///     async fn handle(&self, jid: Xid, payload: Self::Payload) -> Result<(), Self::Error> {
+///     async fn handle(&self, jid: Xid, payload: Self::Payload, cancellation_token: CancellationToken) -> Result<(), Self::Error> {
 ///         // ..do work
 ///         Ok(())
 ///     }
@@ -78,6 +78,7 @@ impl RunnerRouter {
         &self,
         job_handle: H,
         event_tx: tokio::sync::broadcast::Sender<JobEvent>,
+        cancellation_token: CancellationToken,
         cancel: F,
     ) -> Result<(), RunnerError> {
         if let Some(r) = self.jobs.get(job_handle.job_type()) {
@@ -85,7 +86,7 @@ impl RunnerRouter {
             let job_id = job_handle.id();
             let retries = job_handle.retries();
             tokio::select! {
-                job_result = r.handle(job_id, job_handle.payload()) => {
+                job_result = r.handle(job_id, job_handle.payload(), cancellation_token.child_token()) => {
                     match job_result.map_err(JobError::from) {
                         Ok(_) => {
                             job_handle.complete().await?;
@@ -173,7 +174,7 @@ impl RunnerRouter {
         queue: Q,
         poll_interval: Duration,
         event_tx: tokio::sync::broadcast::Sender<JobEvent>,
-        shutdown_event_store: EventStore<()>,
+        cancellation_token: CancellationToken,
         job_timeout: Duration,
     ) where
         Q: AsRef<QR>,
@@ -184,14 +185,14 @@ impl RunnerRouter {
             std::time::Duration::default()
         });
         let job_types = self.types();
-        let mut shutdown_rx = shutdown_event_store.subscribe_events();
+
         loop {
             tokio::select! {
                 next = queue.as_ref().next(&job_types, poll_interval) => {
-                    let mut shutdown_rx = shutdown_event_store.subscribe_events();
+                    let cancellation_token = cancellation_token.child_token();
                     match next {
-                        Ok(handle) => match self.process(handle, event_tx.clone(), async move {
-                            shutdown_rx.recv().await.ok();
+                        Ok(handle) => match self.process(handle, event_tx.clone(), cancellation_token.child_token(), async move {
+                            cancellation_token.cancelled().await;
                             tokio::time::sleep(job_timeout).await;
                             tracing::warn!("Job did not complete within the cancellation grace period");
                         }).await {
@@ -206,7 +207,7 @@ impl RunnerRouter {
                         }
                     }
                 }
-                _ = shutdown_rx.recv() => {
+                _ = cancellation_token.cancelled() => {
                     tracing::debug!("No job running, shutting down");
                     return
                 }
@@ -246,7 +247,12 @@ mod test {
             type Payload = Vec<i32>;
             type Error = Infallible;
 
-            async fn handle(&self, _jid: Xid, _payload: Self::Payload) -> Result<(), Infallible> {
+            async fn handle(
+                &self,
+                _jid: Xid,
+                _payload: Self::Payload,
+                _cancellation_token: CancellationToken,
+            ) -> Result<(), Infallible> {
                 dbg!("we did it patrick");
                 Ok(())
             }
@@ -259,12 +265,17 @@ mod test {
 
         let job: Box<dyn JobProcessor<Payload = _, Error = _>> = Box::new(Example);
 
-        job.handle(xid::new(), payload.clone()).await.unwrap();
+        job.handle(xid::new(), payload.clone(), CancellationToken::new())
+            .await
+            .unwrap();
         let wrapped: Box<dyn JobProcessor<Payload = _, Error = JobError>> =
             Box::new(WrappedJobHandler::new(Example));
 
         let payload = bincode::encode_to_vec(&payload, standard()).unwrap();
 
-        wrapped.handle(xid::new(), payload.into()).await.unwrap();
+        wrapped
+            .handle(xid::new(), payload.into(), CancellationToken::new())
+            .await
+            .unwrap();
     }
 }

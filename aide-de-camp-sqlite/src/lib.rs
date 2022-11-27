@@ -5,8 +5,8 @@ pub mod queue;
 pub mod types;
 
 pub use queue::SqliteQueue;
-use sqlx::migrate::Migrator;
 pub use sqlx;
+use sqlx::migrate::Migrator;
 pub static MIGRATOR: Migrator = sqlx::migrate!();
 
 #[cfg(test)]
@@ -18,7 +18,7 @@ mod test {
     use aide_de_camp::core::job_processor::JobProcessor;
     use aide_de_camp::core::queue::Queue;
     use aide_de_camp::core::{Duration, Xid};
-    use aide_de_camp::prelude::QueueError;
+    use aide_de_camp::prelude::{CancellationToken, QueueError};
     use async_trait::async_trait;
     use sqlx::types::chrono::Utc;
     use sqlx::SqlitePool;
@@ -60,7 +60,12 @@ mod test {
         type Payload = TestPayload1;
         type Error = Infallible;
 
-        async fn handle(&self, _jid: Xid, _payload: Self::Payload) -> Result<(), Self::Error> {
+        async fn handle(
+            &self,
+            _jid: Xid,
+            _payload: Self::Payload,
+            _cancellation_token: CancellationToken,
+        ) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -96,7 +101,12 @@ mod test {
         type Payload = TestPayload2;
         type Error = Infallible;
 
-        async fn handle(&self, _jid: Xid, _payload: Self::Payload) -> Result<(), Self::Error> {
+        async fn handle(
+            &self,
+            _jid: Xid,
+            _payload: Self::Payload,
+            _cancellation_token: CancellationToken,
+        ) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -116,7 +126,12 @@ mod test {
         type Payload = TestPayload2;
         type Error = Infallible;
 
-        async fn handle(&self, _jid: Xid, _payload: Self::Payload) -> Result<(), Self::Error> {
+        async fn handle(
+            &self,
+            _jid: Xid,
+            _payload: Self::Payload,
+            _cancellation_token: CancellationToken,
+        ) -> Result<(), Self::Error> {
             Ok(())
         }
 

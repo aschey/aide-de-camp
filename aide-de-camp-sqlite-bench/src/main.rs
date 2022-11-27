@@ -2,6 +2,7 @@ use aide_de_camp::core::job_processor::{JobError, JobProcessor};
 use aide_de_camp::core::queue::Queue;
 use aide_de_camp::core::Xid;
 use aide_de_camp::core::{Duration, Utc};
+use aide_de_camp::prelude::CancellationToken;
 use aide_de_camp::runner::job_router::RunnerRouter;
 use aide_de_camp::runner::job_runner::JobRunner;
 use aide_de_camp_sqlite::queue::SqliteQueue;
@@ -46,7 +47,12 @@ impl JobProcessor for BenchJob {
     type Payload = BenchJobPayload;
     type Error = JobError;
 
-    async fn handle(&self, jid: Xid, payload: Self::Payload) -> Result<(), Self::Error> {
+    async fn handle(
+        &self,
+        jid: Xid,
+        payload: Self::Payload,
+        _cancellation_token: CancellationToken,
+    ) -> Result<(), Self::Error> {
         let _count = self.count.fetch_add(1, Ordering::SeqCst);
         let duration_millis = Utc::now().timestamp_millis() - payload.started_at_millis;
         self.tx

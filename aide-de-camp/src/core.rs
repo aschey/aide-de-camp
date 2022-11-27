@@ -6,6 +6,8 @@ pub use xid::new as new_xid;
 /// Job ID implementation.
 pub use xid::Id as Xid;
 
+pub use tokio_util::sync::CancellationToken;
+
 /// An alias for `chrono::DateTime<chrono::Utc>`
 pub type DateTime = chrono::DateTime<chrono::Utc>;
 pub use bincode;

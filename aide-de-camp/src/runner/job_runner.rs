@@ -9,7 +9,7 @@ use rand::seq::SliceRandom;
 use std::{future::Future, sync::Arc};
 use tap::TapFallible;
 use tokio::sync::Semaphore;
-
+use tokio_util::sync::CancellationToken;
 pub const JITTER_INTERVAL_MS: [i64; 10] = [0, 1, 1, 2, 3, 5, 8, 13, 21, 34];
 
 /// A bridge between job processors and the queue.
@@ -75,8 +75,8 @@ where
         options: ShutdownOptions,
     ) -> Result<(), QueueError> {
         let workers = FuturesUnordered::new();
-        let (shutdown_tx, _) = tokio::sync::broadcast::channel(32);
-        let shutdown_event_store = EventStore::new(shutdown_tx.clone());
+        let cancellation_token = CancellationToken::new();
+
         loop {
             let semaphore = self.semaphore.clone();
             tokio::select! {
@@ -85,14 +85,14 @@ where
                     let queue = self.queue.clone();
                     let processor = self.processor.clone();
                     let event_tx = self.event_tx.clone();
+                    let cancellation_token = cancellation_token.child_token();
 
-                    let shutdown_event_store = shutdown_event_store.clone();
                     let handle = tokio::spawn(async move {
                         let _permit = permit;
                         let queue = queue;
                         let processor = processor;
                         let interval = interval + get_random_jitter();
-                        processor.listen(queue, interval, event_tx, shutdown_event_store.clone(), options.job_timeout).await;
+                        processor.listen(queue, interval, event_tx, cancellation_token, options.job_timeout).await;
                     });
                     workers.push(handle);
                 }
@@ -102,7 +102,7 @@ where
                             tracing::warn!("Error parsing worker timeout, using default: {e:?}");
                             std::time::Duration::default()
                         });
-                    shutdown_tx.send(()).tap_err(|e| tracing::warn!("Error sending shutdown signal: {e:?}")).ok();
+                    cancellation_token.cancel();
                     match tokio::time::timeout(worker_timeout, join_all(workers)).await {
                         Ok(worker_results) => {
                             for result in worker_results {
